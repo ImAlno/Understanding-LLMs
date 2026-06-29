@@ -24,7 +24,8 @@ speedup-vs-size curve to `gpu_speedup.png` in the current directory.
 
 ## 🛠️ Your TODO
 
-Build `speedups` — for each size `n`, the ratio `CPU_ms / GPU_ms` (use `bench_matmul(dev, n)`).
+Build `speedups` — for each size `n`, the ratio `CPU_ms / GPU_ms` (use `bench_matmul("cpu", n)`
+and `bench_matmul(device, n)`).
 
 ## ✅ Checking your work
 
@@ -40,9 +41,11 @@ Build `speedups` — for each size `n`, the ratio `CPU_ms / GPU_ms` (use `bench_
 kernel for GELU** at runtime (`torch.utils.cpp_extension.load_inline`), where each GPU thread
 computes one element, and checks it against PyTorch's GELU.
 
-> ⚠️ **CUDA-only** — it needs an NVIDIA GPU, so run it on **Colab** (it prints a note and exits on
-> CPU/Apple GPU). It's written against the standard `load_inline` pattern but was *not* testable on
-> the author's machine (no local CUDA) — if your Colab run needs a tweak, let us know.
+> ⚠️ **CUDA-only, and needs `ninja`** — it requires an NVIDIA GPU, so run it on **Colab** (it
+> prints a note and exits on CPU/Apple GPU). Colab compiles the kernel with the `ninja` build
+> tool, which isn't pre-installed — run `!pip install ninja` in a cell first. It's written against
+> the standard `load_inline` pattern but was *not* testable on the author's machine (no local
+> CUDA) — if your Colab run needs a tweak, let us know.
 
 This is the doorway to the rest of the speed arc: PyTorch's fast ops are kernels like this, and
 [`llm.c`](https://github.com/karpathy/llm.c) is a whole GPT written in them.

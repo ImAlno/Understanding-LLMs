@@ -21,5 +21,6 @@ else:
         gt = bench_matmul(device, n)
         winner = "GPU" if gt < ct else "CPU"
         print(f"  {n:>5}x{n:<5}: CPU {ct:7.2f} ms | GPU {gt:7.2f} ms  ->  {winner} wins ({ct / gt:.1f}x)")
-    print("\nThe crossover is where the GPU starts winning. On a datacenter GPU it's at a smaller")
-    print("size and the high-end speedup is far bigger than a laptop GPU's.")
+    print("\nThe crossover is where the GPU starts winning. On a weak GPU (a laptop) it's around")
+    print("1024-2048 (and noisy near there); on a strong one (a datacenter GPU) it's so small the")
+    print("GPU wins at EVERY size here. If you see no 'CPU wins' row at all, your GPU is strong.")

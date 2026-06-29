@@ -18,8 +18,8 @@ if device == "cpu":
     print("No GPU detected — run this on Colab (Runtime → GPU) for the curve.")
     raise SystemExit(0)
 
-# ✍️ TODO: for each n in `sizes`, time a CPU and a GPU matmul (bench_matmul(dev, n)) and append the
-#          speedup (CPU ms / GPU ms) to `speedups`.
+# ✍️ TODO: for each n in `sizes`, time a CPU matmul `bench_matmul("cpu", n)` and a GPU matmul
+#          `bench_matmul(device, n)`, and append the speedup (CPU ms / GPU ms) to `speedups`.
 speedups = []      # replace
 if not speedups:
     raise SystemExit("Fill the TODO (build the speedups list), then run again.")

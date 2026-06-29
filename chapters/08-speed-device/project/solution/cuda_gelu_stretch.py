@@ -10,7 +10,7 @@ one element. Then we check it matches PyTorch.
     pattern but could NOT be tested on the author's machine (no CUDA here) — if a line needs a
     nudge on your Colab run, tell us. On non-CUDA it just prints a note and exits.
 
-    python cuda_gelu_stretch.py        (Google Colab, Runtime → GPU)
+    On Colab: run  !pip install ninja  once (it compiles with ninja), then run this with a GPU.
 """
 import torch
 
@@ -19,7 +19,12 @@ if not torch.cuda.is_available():
     print("Runtime → Change runtime type → GPU, and run this there.")
     raise SystemExit(0)
 
-from torch.utils.cpp_extension import load_inline
+from torch.utils.cpp_extension import load_inline, is_ninja_available
+
+if not is_ninja_available():
+    print("This needs the 'ninja' build tool to compile the kernel.")
+    print("On Colab, run this in a cell first:  !pip install ninja   (then re-run this).")
+    raise SystemExit(0)
 
 # One CUDA kernel: each thread handles one element of the input.
 cuda_source = r"""

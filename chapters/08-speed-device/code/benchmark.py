@@ -60,9 +60,9 @@ def main():
             print(f"{n:>6} {ct:>9.2f} {gt:>9.2f} {ct / gt:>6.1f}x")
         else:
             print(f"{n:>6} {ct:>9.2f} {'—':>9} {'—':>8}")
-    print("\nSmall matrices: the CPU often wins — the GPU's launch overhead isn't worth it.")
-    print("Big matrices: the GPU pulls ahead. On a datacenter GPU (Colab's T4) the gap is far")
-    print("larger than on a laptop — tens of times, not ~2x.")
+    print("\nThe GPU's advantage grows with size. For tiny matmuls a weak laptop GPU can even lose")
+    print("(its launch overhead isn't worth it); big matmuls win. And a datacenter GPU (Colab's T4)")
+    print("wins by far more than a laptop — tens of times, and at every size, not ~2x.")
 
 
 if __name__ == "__main__":

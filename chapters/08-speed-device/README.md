@@ -70,8 +70,9 @@ def get_device():
     return "cpu"                             # always works
 ```
 
-To put a tensor or a model on a device, use **`.to(device)`** (tensors are returned moved;
-`nn.Module`s move in place):
+To put a tensor or a model on a device, use **`.to(device)`**. One subtle gotcha: for a **tensor**
+you must *reassign* (`x = x.to(device)`) — `x.to(device)` on its own returns a moved copy and is
+silently lost — but a **model** moves *in place*, so `model.to(device)` alone is enough:
 
 ```python
 device = get_device()
@@ -99,29 +100,55 @@ a + b
 ```
 
 This is the #1 beginner GPU error: the model is on the GPU but a batch of data is still on the
-CPU. The fix is always the same — move the stray tensor: `a.to(device) + b`. In a training loop
-that means moving **each batch** to the device before the forward pass.
+CPU. The fix is always the same — move the stray tensor: `a.to(device) + b`. In a real training
+loop (like your Chapter 5 GPT, which loops over batches) that means moving **each batch** to the
+device before the forward pass:
+
+```python
+model = model.to(device)                 # once
+for xb, yb in loader:                     # every step:
+    xb, yb = xb.to(device), yb.to(device) # move THIS batch onto the device
+    loss = loss_fn(model(xb), yb)         # ...now model and data are on the same device
+```
 
 ---
 
-## 3. The speedup — and its crossover
+## 3. The speedup — and how it depends on the GPU
 
 > ✏️ **In the notebook → Step 4.** Benchmark it.
 
-Time an `n×n` matmul on the CPU and the GPU as `n` grows. On this Apple laptop (MPS):
+Time an `n×n` matmul on the CPU and the GPU as `n` grows. On this **Apple laptop (MPS)**:
 
 ```
  size    CPU ms    GPU ms  speedup
-  256      0.03      0.11    0.2x      <- CPU wins! GPU overhead isn't worth it
- 1024      1.22      1.11    1.1x      <- about even (the crossover)
- 4096     74.71     46.94    1.6x      <- GPU wins
+  256      0.03      0.11    0.2x      <- CPU wins! the laptop GPU's overhead isn't worth it
+ 1024      1.22      1.11    1.1x      <- about even (the crossover, here)
+ 4096     74.71     46.94    1.6x      <- GPU wins, but only ~1.6x
 ```
 
-Two lessons. **(1)** For *small* work the GPU is **slower** — every GPU call has launch overhead,
-and for a tiny matmul that overhead dominates. There's a **crossover size** below which the CPU
-wins. **(2)** The speedup *grows* with the size of the work. On a laptop's integrated GPU it tops
-out around ~2×; on a **datacenter GPU like Colab's T4 the same benchmark shows tens of times** —
-because real GPUs have far more cores and memory bandwidth. Run the notebook on Colab to see it.
+And on Colab's **datacenter GPU (a T4)** — the same code, much stronger hardware (real numbers
+from a reader's run):
+
+```
+ size    CPU ms    GPU ms  speedup
+  256      0.41      0.06    7.2x      <- the T4 already wins here — no CPU-winning crossover
+ 1024     26.47      0.84   31.7x
+ 4096   1053.13     39.70   26.5x
+```
+
+(These are *two different machines*, so their CPU columns differ — Colab's CPU is much slower than
+this laptop's. The `speedup` is computed from the un-rounded times, so it won't exactly match
+dividing the rounded `ms`. And the small dip from 31.7× to 26.5× is just measurement noise — the
+trend is what matters.)
+
+Two lessons. **(1)** The GPU's advantage **grows with the size of the work** — every GPU call has
+a fixed launch overhead, so for tiny matmuls the speedup is small. On a *weak* GPU that overhead
+can make the CPU actually win below a **crossover size** (the laptop's `0.2×` at 256); a *strong*
+GPU is fast enough to win even there, so its crossover sits below this whole range. **(2)** How
+big the speedup gets depends on the GPU: a laptop's integrated GPU tops out around **~2×**, while
+the **T4 hits ~30×** — datacenter GPUs have far more cores and **memory bandwidth** (how fast they
+can read and write their own memory). The more powerful the GPU, the smaller the work where it
+starts paying off, and the larger the eventual speedup.
 
 ---
 
@@ -157,8 +184,8 @@ compute. Two habits follow:
 
 - **Keep data on the GPU.** Move a batch over once, do all the work there. Don't bounce tensors
   back and forth.
-- **Don't `.item()` / `.cpu()` in the hot loop.** Pulling the loss back to the CPU *every step* to
-  print it forces a sync and a transfer; do it every N steps instead.
+- **Don't `.item()` / `.cpu()` in the hot loop** (the per-step inner training loop). Pulling the
+  loss back to the CPU *every step* to print it forces a sync and a transfer; do it every N steps.
 
 A surprising amount of "my GPU training is slow" is really "I'm copying data across the boundary
 too often."
@@ -179,8 +206,10 @@ Colab GPU has memory to spare.
 ## 7. What CUDA actually is
 
 **CUDA** is NVIDIA's platform for running code on the GPU. A function that runs on the GPU is a
-**kernel**, and it runs in thousands of parallel **threads** (organized into *blocks* and a
-*grid*) — each thread handling one small piece, e.g. one output element of a matmul. When you call
+**kernel**, and it runs in thousands of parallel **threads** — each handling one small piece, e.g.
+one output element of a matmul. (Those threads are organized into **blocks** (small groups that
+run together) and a **grid** (all the blocks for the job) — the structure you'd specify if you
+*wrote* a kernel, as in the project's stretch.) When you call
 `a @ b` on a `cuda` tensor, PyTorch launches a highly-optimized matmul *kernel* for you.
 
 You don't have to *write* CUDA to use a GPU — `.to("cuda")` and PyTorch's built-in kernels get you
