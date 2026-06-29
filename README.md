@@ -63,7 +63,7 @@ optionally watch the matching Karpathy video.
 | 02 | [Micrograd](./chapters/02-micrograd/) | machine learning, backpropagation, building autograd from scratch | ✅ |
 | 03 | [N-gram Model](./chapters/03-ngram-mlp/) | multi-layer perceptron, embeddings, matmul, GELU | ✅ |
 | 04 | [Attention](./chapters/04-attention/) | attention, softmax, positional encoding | ✅ |
-| 05 | [Transformer](./chapters/05-transformer/) | the Transformer, residuals, LayerNorm, GPT-2 | 🗓️ |
+| 05 | [Transformer](./chapters/05-transformer/) | the Transformer, residuals, LayerNorm, GPT-2 | ✅ |
 | 06 | [Tokenization](./chapters/06-tokenization/) | minBPE, byte-pair encoding | 🗓️ |
 | 07 | [Optimization](./chapters/07-optimization/) | initialization, optimization, AdamW | 🗓️ |
 | 08 | [Need for Speed I: Device](./chapters/08-speed-device/) | CPU, GPU, CUDA, devices | 🗓️ |
