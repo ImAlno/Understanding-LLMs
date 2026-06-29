@@ -71,6 +71,27 @@ We say "the derivative of `f` at `x = 3` is 6." (If you remember the rule
 nudged and measured. That trick is called a **finite difference**, and you'll use it
 in the notebook.)
 
+**The sign matters as much as the size.** Our derivative at `x = 3` was *positive* (`+6`): nudge
+`x` up, and `f` goes up. Now sit at `x = −3` instead. Nudging up to `−2.999` gives
+`f = 8.994001`, a change of `−0.005999` per `0.001` of nudge — the derivative is *negative*
+(`−6`): nudge `x` up, and `f` goes *down*. And right at the bottom, `x = 0`, a tiny nudge barely
+moves `f` at all — the derivative is `0`. Picture the curve of `x²`, a valley:
+
+```
+  f(x) = x²    ╲                         ╱
+                ╲  slope −6 here ↙     ↘ slope +6 here
+                 ╲____             ____╱
+                      ╲___  ___  __╱
+                          ╲╱   ╲╱   ← slope 0 at the bottom (x = 0)
+```
+
+A derivative is just the **slope** of the curve at a point: rising steeply → big positive, falling
+steeply → big negative, flat (a minimum) → zero. *This is the whole reason gradient descent
+works.* To make the loss smaller you step **opposite** the derivative — downhill — by an amount
+proportional to its size; where the derivative reaches zero, the slope is flat and you've arrived
+at the bottom. The gradient is your compass: its **sign** says which way is downhill, its **size**
+says how steep.
+
 > 📐 **Notation, decoded once.** You'll see derivatives written `d(out)/da` throughout
 > this chapter. Read the whole thing as one symbol meaning *"how much `out` moves when
 > you nudge `a`"* — exactly the sensitivity above, just in shorthand. (The `d`s aren't
@@ -188,6 +209,12 @@ node. The tool that gets us there is the **chain rule**, and the intuition is ju
 > and one notch of B moves gear C **five** notches, then one notch of A moves C
 > **2 × 5 = 10** notches. Sensitivities multiply.
 
+Concretely, with numbers: say `b = a²` and `c = 3b`, sitting at `a = 4`. The two *local*
+sensitivities are `d(b)/da = 2a = 8` (nudge `a`, `b` moves 8×) and `d(c)/db = 3` (nudge `b`, `c`
+moves 3×). So nudging `a` should move `c` by `8 × 3 = 24`. Check it directly: at `a = 4`,
+`c = 3·16 = 48`; at `a = 4.001`, `c = 3·16.008001 = 48.024003`, a change of `0.024` per `0.001` of
+nudge — that's **24**. The chain rule (multiply the locals) and the brute-force nudge agree exactly.
+
 In our graph, `a` affects `e` affects `d`. So:
 
 ```
@@ -265,10 +292,14 @@ stores a tiny `_backward` function that knows that node's local rule. Here are `
 
 Two things every beginner asks about here:
 
-- **Why `+=` and not `=`?** Because a Value can feed into *several* places (e.g.
-  `b` used twice). Its total sensitivity is the **sum** of the gradients arriving from
-  each path, so we *accumulate*. (This is also why we reset grads to 0 before each
-  backward pass — Chapter 1's `W.grad = None` was the same idea.)
+- **Why `+=` and not `=`?** Because a Value can feed into *several* places, and its total
+  sensitivity is the **sum** of the gradients arriving along each path. The cleanest case is a value
+  used twice — `g = a * a` (that's `a²`). Here `a` is *both* inputs to the `*`, so backprop reaches
+  it from two sides and adds: at `a = 3` with `g.grad = 1`, `a.grad = a·g.grad + a·g.grad =
+  3 + 3 = 6` — exactly `d(a²)/da = 2a = 6`. With a plain `=`, the second contribution would
+  *overwrite* the first and you'd get `3`, the wrong answer. Accumulation is what makes the two
+  paths add up. (It's also why we zero the grads before each backward pass — Chapter 1's
+  `W.grad = None` was the same idea; otherwise last step's gradients would leak into this one.)
 - **Why is `_backward` a function stored on `out`?** So we can call it later, once
   `out.grad` is known. Each node says "when you finally know *my* gradient, here's how
   I'll pass it to my parents." This works because of a Python feature called a
@@ -320,23 +351,70 @@ inputs — so each node's `_backward` runs only once its own `.grad` is final. T
 ordering is the only thing standing between us and a tangle of gradients computed in the
 wrong order.
 
+**Watch one run, node by node.** On our graph `d = (a×b) + c`, `build_topo` produces the order
+`[c, a, b, e, d]`, and we walk it **reversed** (`d` first):
+
+```
+seed:  d.grad = 1
+d._backward()   (the + node):   e.grad += 1·1 = 1        c.grad += 1·1 = 1
+e._backward()   (the * node):   a.grad += b·e.grad = −3·1 = −3
+                                b.grad += a·e.grad =  2·1 =  2
+a, b, c are leaves — their _backward does nothing (no parents to hand a gradient to)
+```
+
+Every `.grad` is now filled: `d=1, e=1, c=1, a=−3, b=2` — *exactly* the numbers you found by hand
+in §5. Watch the ordering earn its keep: `e._backward` ran only *after* `d._backward` had given
+`e` its gradient, so by the time `e` passed gradient to `a` and `b`, its own `.grad` was already
+final. Swap in a million nodes and nothing changes but the length of the list.
+
 Call `d.backward()` and every `.grad` in the graph fills in — the same numbers you got
 by hand, for a graph of any size. **That's the entire engine** — and with the closure and
 the ordering both spelled out, there's no magic left in it. Everything after this is just
 *using* it.
 
+> 💡 **Why backprop, and not just nudge every weight?** You *could* get each weight's gradient the
+> finite-difference way from the primer — nudge that one weight, re-run the whole forward pass,
+> measure the change in the loss. But a real network has *millions* of weights, and that recipe
+> needs a separate forward pass **per weight**: millions of forward passes for a single gradient
+> step. Hopeless. Backprop's whole magic is that **one** backward walk fills in the gradient for
+> **every** weight at once — reusing each node's gradient as it flows down — for about the cost of
+> a *single* forward pass, not millions. That efficiency is the entire reason training large
+> networks is even possible. (Christopher Olah's article, linked at the end, draws this out
+> beautifully.)
+
 ---
 
 ## 7. A nonlinearity: `tanh`
 
-To build a neuron we need one more ingredient: a **nonlinearity**. Why? Because a stack
-of purely linear steps (adds and multiplies) collapses into a single linear step — no
-matter how many layers, you'd get something no more powerful than one. A nonlinear
-"squash" in between is what lets networks bend and learn interesting shapes.
+To build a neuron we need one more ingredient: a **nonlinearity**. Why? Because a stack of purely
+linear steps (adds and multiplies) collapses into a single linear step. See it concretely: send
+`x` through `y = 2x + 1`, then send that through `z = 3y − 4`. Substitute the first into the
+second: `z = 3(2x + 1) − 4 = 6x − 1` — a *single* straight line. Stack a hundred more linear layers
+and you'd **still** just get `z = (some number)·x + (some other number)`. No amount of stacking
+buys you a curve, so all those extra layers are wasted.
 
-We'll use **`tanh`**, which gently squashes any number into the range `(−1, 1)`: big
-positives → near `+1`, big negatives → near `−1`, and `0 → 0`. Its local derivative is
-beautifully simple, `1 − tanh(x)²`:
+A nonlinear **squash** between the linear steps breaks that collapse: `tanh(2x + 1)` genuinely
+*cannot* be flattened back into `m·x + b`, so now each layer adds real expressive power — that's
+what lets a network bend to fit complicated shapes.
+
+We'll use **`tanh`**, which gently squashes any number into the range `(−1, 1)`: big positives →
+near `+1`, big negatives → near `−1`, and `0 → 0`. Picture its S-shape:
+
+```
+ tanh(x) +1┤           ╭─────────────
+           ┤       ╭──╯
+          0┤───────┼──╯
+           ┤    ╭─╯
+        −1 ┤────╯
+           └──────────┼──────────────
+                      0        x
+```
+
+Near `0` it's almost a straight line — it passes small signals through nearly untouched. Far out
+in either direction it **saturates**: it flattens toward ±1, where its slope `1 − tanh²` shrinks
+toward `0`. (Hold onto that — a *saturated* neuron has almost no gradient, so it barely learns;
+that's a real failure mode we diagnose and fix in Chapter 7.) Its local derivative is beautifully
+simple, `1 − tanh(x)²`:
 
 ```python
     def tanh(self):
@@ -347,6 +425,18 @@ beautifully simple, `1 − tanh(x)²`:
         out._backward = _backward
         return out
 ```
+
+Notice the **shape is identical for every operation** — `+`, `*`, `tanh`, and any other:
+
+1. compute the forward result and wrap it in a `Value`, recording its parents and the op;
+2. define a `_backward` closure holding *this op's local rule* (how each parent's grad relates to
+   `out.grad`);
+3. attach it as `out._backward` and return.
+
+That's the whole recipe. Want `exp`, division, or a different squash like `ReLU`? Same three
+steps — just drop in that operation's local derivative. The engine doesn't get *more complex* as
+you add operations, it just learns more *verbs*. (You'll add a couple yourself in the exercises and
+gradient-check them against PyTorch — proof the pattern really does generalize.)
 
 > ✏️ **In the notebook → Steps 3–4.** You'll fill in the `_backward` rules for `+`
 > and `*`, then build a neuron's forward pass.
@@ -383,11 +473,71 @@ Two bits of Python worth unpacking there:
   return act.tanh()
   ```
 
-Stack neurons into a **`Layer`**, stack layers into an **`MLP`** (multi-layer
-perceptron), and collect every weight via `parameters()` — see
-[`code/nn.py`](./code/nn.py). `MLP(3, [4, 4, 1])` means: 3 inputs → a layer of 4 →
-a layer of 4 → 1 output. That's 41 `Value` parameters, each one a knob backprop can
-tune.
+**What is a neuron, really?** `w·x + b` is a *weighted vote*: it scores how strongly the input `x`
+lines up with the neuron's own pattern of weights `w`, shifted by the bias `b`. A big positive
+score means "`x` looks like the thing I'm tuned to detect"; a big negative score means "the
+opposite"; near zero means "on the fence." The `tanh` then turns that raw score into a soft yes/no
+in `(−1, 1)`. So **one neuron draws one soft boundary** through its input space — and stacking many
+of them, in layers, lets the network carve that space into the intricate regions real data needs.
+The weights and bias are the knobs; backprop is what tunes them.
+
+**Let's backprop one by hand**, to watch all three rules fire together. Take the simplest neuron —
+a single input — `n = tanh(w·x + b)`, with `w = 0.5, x = 2, b = 1`. Forward: `w·x = 1`, `+ b = 2`,
+`tanh(2) ≈ 0.964`. Now backward, right to left, seeding `n.grad = 1`:
+
+```
+n = tanh(s),  s = w·x + b = 2
+  tanh rule:  s.grad = (1 − tanh(s)²)·n.grad = (1 − 0.964²)·1 ≈ 0.071
+s = (w·x) + b                       a '+' passes the gradient straight through:
+  (w·x).grad = 0.071                b.grad = 0.071
+w·x = w · x                         a '*' gives each input the OTHER's value:
+  w.grad = x·0.071 = 2·0.071  ≈ 0.142
+  x.grad = w·0.071 = 0.5·0.071 ≈ 0.036
+```
+
+So `w.grad ≈ 0.142`: nudge this weight up and the neuron's output rises, gently. Every number came
+from one of just three rules — tanh's `1 − tanh²`, addition's pass-through, multiplication's
+swap — chained together. That is *exactly* what `loss.backward()` does across a whole MLP, only
+with thousands of these little steps instead of three.
+
+Now we stack neurons. A **`Layer`** is just a *row* of independent neurons, all seeing the same
+inputs; an **`MLP`** (multi-layer perceptron) is a *stack* of layers, where each layer's outputs
+become the next layer's inputs:
+
+```python
+class Layer:
+    def __init__(self, nin, nout):
+        self.neurons = [Neuron(nin) for _ in range(nout)]   # nout neurons, each taking nin inputs
+    def __call__(self, x):
+        outs = [n(x) for n in self.neurons]                 # run every neuron on the same x
+        return outs[0] if len(outs) == 1 else outs
+
+class MLP:
+    def __init__(self, nin, nouts):
+        sizes = [nin] + nouts                                # e.g. [3, 4, 4, 1]
+        self.layers = [Layer(sizes[i], sizes[i+1]) for i in range(len(nouts))]
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)        # the output of one layer is the input to the next
+        return x
+```
+
+So `MLP(3, [4, 4, 1])` reads "**3 inputs → a layer of 4 neurons → a layer of 4 → 1 output**." Count
+the knobs: the first layer is 4 neurons × (3 weights + 1 bias) = 16; the second, 4 × (4+1) = 20;
+the last, 1 × (4+1) = 5 — **41 `Value` parameters** in all, each a dial backprop can turn.
+
+The one bit of glue is **`parameters()`**, which gathers every weight and bias from every neuron in
+every layer into a single flat list:
+
+```python
+    def parameters(self):                                    # on the MLP
+        return [p for layer in self.layers for p in layer.parameters()]   # all 41 Values
+```
+
+That flat list is exactly what the training loop steps over to update (`for p in
+model.parameters(): p.data += ...`) and what `zero_grad()` steps over to reset. And nothing here is
+new — it's `Value`s all the way down, so the *entire* MLP is automatically differentiable: one call
+to `loss.backward()` and all 41 gradients appear at once.
 
 ---
 
@@ -409,6 +559,26 @@ for step in range(100):
     for p in model.parameters():
         p.data += -0.05 * p.grad                           # update: step downhill
 ```
+
+Every pass through that loop does four things, all now fully transparent to you:
+
+1. **Forward** — run the model on the inputs; as a side effect this *builds the graph* of every
+   `Value` from weights to predictions to loss.
+2. **Loss** — collapse all the predictions into one number that says how wrong we are right now.
+3. **Backward** — `loss.backward()` (your engine!) walks that graph in reverse and fills every
+   `p.grad`: the sensitivity of the loss to each weight.
+4. **Update** — nudge each weight a small step `−0.05 × grad`, i.e. *downhill* (opposite its
+   gradient), exactly the "step opposite the slope" from the primer's valley.
+
+(Why *squared* error for the loss? `(yp − yt)²` is `0` for a perfect prediction and grows as the
+prediction drifts off — and squaring makes being wrong by `2` count *four* times as much as being
+wrong by `1`, so the optimizer attacks the worst mistakes first. Summed over every example, it's a
+single number that is small *exactly* when the model is right everywhere — which is why minimizing
+it makes the model good.)
+
+Repeat a hundred times and the loss walks down that valley. The `−0.05` is the **step size** (the
+*learning rate*): too big and you leap past the bottom, too small and you crawl — a knob we tune
+properly in Chapter 7.
 
 Run [`code/train_demo.py`](./code/train_demo.py) and watch it learn:
 
@@ -444,8 +614,15 @@ print(a.grad, b.grad)     # tensor([-3.]) tensor([2.])  ← identical to our by-
 Chapter 1's `loss.backward()` was doing precisely what you just built — recording a
 graph on the forward pass, then walking it backward with the chain rule. The only
 difference: PyTorch does it on whole **tensors** (arrays) at once instead of one scalar
-at a time, which is what makes it fast enough for real models. We make that same leap
-to tensors in Chapter 3.
+at a time, which is what makes it fast enough for real models.
+
+Why is that leap such a big deal? Our engine creates one `Value` — and one little `_backward`
+closure — for *every single number*. A real model has billions of numbers, and billions of tiny
+Python objects calling billions of tiny functions would be hopelessly slow. PyTorch instead wraps a
+whole **array** of numbers in one object and applies each operation to *all* of them at once (on
+hardware built for exactly that — Chapter 8). The *logic* is identical to what you just wrote — a
+graph on the way forward, the chain rule on the way back — only the unit of work changes, from one
+number to a whole array. We make that exact leap in Chapter 3.
 
 > 🔎 **Verify it yourself.** In the exercises you'll run a full gradient-check: the same
 > tangle of `+`, `*`, `**`, `tanh` in both your engine and PyTorch, asserting every
@@ -471,6 +648,14 @@ to tensors in Chapter 3.
   *closure*: a function that remembers the variables around it (here, `self`, `other`,
   `out`). That memory is exactly what lets it apply the right local rule later. Re-read
   §6 with that in mind and it clicks.
+- **Why does the *order* of the backward pass matter so much?** A node can only hand its gradient
+  to its parents once *its own* gradient is complete — i.e. after every node downstream of it has
+  run. The reversed topological sort guarantees exactly that order. Run the nodes in the wrong
+  order and a node would pass on a half-finished gradient, quietly corrupting everything upstream.
+- **A `Value` is used in two places — does backprop double-count it?** It *sums*, which is the
+  correct thing: each path contributes its gradient via `+=`, and the true sensitivity is the total
+  over all paths (the `g = a*a` example in §6). The bug would be using `=` and keeping only the
+  *last* path's contribution.
 
 ---
 

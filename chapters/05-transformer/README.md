@@ -30,8 +30,10 @@ introduce a few more PyTorch wrappers (`nn.Sequential`, `nn.ReLU`, `nn.LayerNorm
 
 ## 0. Setup
 
-Same dataset as Chapter 4 (tiny Shakespeare, in [`data/input.txt`](./data/input.txt)). The
-finished reference is [`code/gpt.py`](./code/gpt.py).
+Same dataset as Chapter 4 (tiny Shakespeare, in [`data/input.txt`](./data/input.txt)). By the end
+you'll have a complete, trainable GPT in ~150 lines — the finished reference is
+[`code/gpt.py`](./code/gpt.py) — and it generates recognizable Shakespeare in under two minutes on a
+laptop CPU.
 
 ```bash
 uv venv --python 3.13 .venv && uv pip install -r requirements.txt
@@ -55,6 +57,12 @@ Chapter 4's model was *one* attention head feeding straight into the output. It 
 The Transformer fixes all three: **multi-head** attention (#1), a **feed-forward** net (#2),
 and **residual connections + LayerNorm** that make **deep stacks** trainable (#3). Let's add
 them one at a time.
+
+Here's the plan, mapped to the sections below: §1 adds **multi-head** attention (many heads, then a
+projection); §2 adds the **feed-forward net** (the per-token "think"); §3–§4 add **residual
+connections** and **LayerNorm** (the scaffolding that lets us stack §1 + §2 deep); §5 packages all
+four into a reusable **block**; §6 stacks blocks into the **GPT**. Five short steps from one
+attention head to a real language model — keep that map in mind as the pieces arrive.
 
 ---
 
@@ -83,6 +91,25 @@ projection, when `cat` already gives the right shape? Each head computed its chu
 isolation* — the projection is a learned mix that lets information flow *across* heads. (If you
 did Chapter 4's optional E05, you built the multi-head part; the projection here is the new piece.)
 
+**The shapes**, with `n_embd = 64` and `4` heads of size `16`: each head turns `(B, T, 64)` into
+`(B, T, 16)`; `torch.cat` glues the four `(B,T,16)` outputs along the last axis back to `(B, T, 64)`;
+the projection (a `64 × 64` Linear) then mixes them. Why split 64 into four 16s rather than run one
+head of 64? Because each head has its *own* query/key/value, so it can learn its *own* notion of
+"what's relevant" — one head might track subject–verb agreement, another match quotes and brackets,
+another follow spacing. Four small heads each hunting for a different thing beat one big head forced
+to squeeze every pattern into a single set of weights. The projection then lets those four findings
+*talk to each other* before the layer's output moves on.
+
+On tiny numbers the concat is literal: if head A outputs `[1, 2]` for a token and head B outputs
+`[3, 4]`, then `torch.cat([A, B], dim=-1)` is `[1, 2, 3, 4]` — the heads' findings laid side by
+side. The projection (a learned matrix) then blends those four numbers into the token's final
+output, so what head A discovered can influence the slots head B wrote, and vice versa.
+
+In a trained model you can often *see* the specialization by visualizing the heads: one head's
+attention sharply tracks "attend to the previous space," another "attend to the matching open
+quote," another "two characters back." Each becomes a small expert, and the projection pools their
+expertise.
+
 ---
 
 ## 2. The feed-forward net: gather, then think
@@ -110,6 +137,20 @@ class FeedForward(nn.Module):
 nonlinearity `max(0, x)` — a simpler cousin of Chapter 3's `tanh`/GELU.) The slogan for a
 Transformer block is **"communicate, then think"**: attention gathers, the feed-forward net
 digests — *per position, independently*.
+
+Why widen to **4×** in the middle? The hidden layer needs room to compute richer features than the
+`n_embd`-sized input allows; `4×` is the ratio the original Transformer used, and it stuck. And
+*per position, independently* is worth dwelling on: the same little MLP runs on each token's vector
+*separately* — no mixing between positions happens here (attention already did that). So a block has
+a clean division of labour: **attention moves information *between* tokens; the feed-forward net
+transforms *each token on its own*.** Shape-wise it's `(B,T,C) → (B,T,4C) → (B,T,C)` — wide in the
+middle, same size in and out, so blocks stack cleanly.
+
+Concretely, for one token: its `n_embd` numbers expand up to `4·n_embd` (the wide `Linear`), `ReLU`
+zeroes out the negatives (keeping only the features that "fired"), and a second `Linear` projects
+back down. It's a little pattern-detector run on each token's just-gathered context — *"given what I
+pulled in from attention, here's a transformed summary."* The same two weight matrices are applied
+to every position independently.
 
 ---
 
@@ -141,6 +182,20 @@ and merges it back. Two things follow:
 - **Each sublayer only learns a *small adjustment*** to the running representation, rather than
   rebuilding it from scratch — which is far easier to optimize.
 
+To feel why, put numbers on it. Imagine 10 layers, each of which (on the way back) multiplies the
+gradient by `0.7`. Stacked, the gradient reaching layer 1 is scaled by `0.7¹⁰ ≈ 0.028` — 35× weaker
+than at the top, so layer 1 barely budges. (Make the factor `1.3` instead and it *explodes* to
+`1.3¹⁰ ≈ 13.8`.) The residual `+` adds a parallel route that multiplies by **`1`** at every layer,
+so the gradient always has a clean identity path home — it can't vanish or explode no matter how
+deep the stack gets. That single `+1` per layer is what turns "10 layers" into "100 layers that
+still train."
+
+There's a second nice consequence, for *learning*: because a block computes `x + (small change)`,
+an untrained block — whose sublayers start near zero — is almost the **identity**, passing `x`
+through nearly untouched. So dropping a fresh block into a working network *starts* harmless and only
+helps as it learns. That's a big part of why you can stack dozens of them and training stays stable
+from the very first step.
+
 Residual connections are the single trick that unlocked very deep networks (they come from
 ResNet, 2015). Without them, you cannot train a 12- or 96-layer Transformer.
 
@@ -169,6 +224,13 @@ merged result). So a sublayer becomes `x + sublayer(ln(x))`.
 (`nn.LayerNorm(n_embd)` is a layer with two small learnable vectors; you don't have to compute
 the mean/variance yourself.)
 
+On numbers: say a token's 4 features come out as `[1, 2, 3, 10]`. Their average is `4`, so subtract
+it → `[−3, −2, −1, 6]`; their spread (standard deviation) is about `3.5`, so divide → roughly
+`[−0.85, −0.57, −0.28, 1.70]`. Now they're centered at 0 with a consistent scale, *whatever* wild
+values they started from. LayerNorm does this for every token, in every layer — so no matter how the
+activations drift as they flow through a deep stack, each LayerNorm pulls them back into a sane
+range before the next sublayer ever sees them.
+
 ---
 
 ## 5. The Transformer block
@@ -191,6 +253,25 @@ class Block(nn.Module):
         x = x + self.ffwd(self.ln2(x))    # think (feed-forward), add back
         return x
 ```
+
+Notice a block takes `(B, T, C)` in and returns `(B, T, C)` out — *same shape*. That's exactly why
+you can stack them: each block's output is a valid input to the next. A block doesn't change the
+*shape* of the representation, it *refines* it — like passing a draft through one editor after
+another, each making it a little sharper.
+
+(What do the *different* blocks learn? Roughly, earlier blocks pick up local, surface patterns —
+which characters tend to follow which — and later blocks build more abstract structure on top, like
+where a line or a speaker's turn should end. Nobody assigns these roles; depth plus the residual
+highway lets the stack discover a hierarchy on its own.)
+
+**Follow a token through one block.** Say we're processing the `t` in `"cat"`. (1) LayerNorm tidies
+its features. (2) Attention lets it look back at `c` and `a` and pull in context — "I'm the third
+letter of a short word starting `ca`" — that's *communicate*. (3) The residual `+` adds that
+gathered context onto the original `t`. (4) LayerNorm again, then (5) the feed-forward net transforms
+the combined vector on its own — "given a `t` after `ca`, here's a more useful representation" —
+that's *think*. (6) Another residual `+`. Out comes a `t` that now carries both its own identity and
+what it learned from its neighbours. Stack four of these and the representation grows
+correspondingly richer.
 
 That's the whole Transformer block — the unit that GPT-2 stacks 12 times and GPT-3 stacks 96.
 
@@ -224,24 +305,84 @@ class GPT(nn.Module):
 the `*` *spreads* that list into separate arguments — as if you'd typed `Block(), Block(), …` by
 hand — so `self.blocks(x)` runs `x` through all of them in order.)
 
+Here's the whole GPT on one page:
+
+```
+   token ids  (B, T)
+       │   token embedding  +  position embedding
+       ▼
+    x  (B, T, C)
+       │        ┌──────────────── Block ────────────────┐
+       ├───────►│  x = x + attention( LayerNorm(x) )      │  ← communicate
+       │        │  x = x + feedforward( LayerNorm(x) )    │  ← think
+       │        └────────────────────────────────────────┘
+       │            (n_layer identical blocks, stacked)
+       ▼
+   final LayerNorm
+       │   lm_head:  Linear(C → vocab)
+       ▼
+   logits  (B, T, vocab)   →   softmax   →   P(next token)
+```
+
+Embeddings in, a stack of identical blocks, a final norm, a linear head out. Every block does the
+same two things — "communicate, then think" — each wrapped in a residual `+` and a LayerNorm. The
+rest of this section is just naming the pieces in that picture.
+
+The embeddings are exactly Chapter 4's: `token_embedding` gives each character its learned vector,
+`position_embedding` gives each slot `0…T−1` its own, and we **add** them so each input carries both
+content and position (`torch.arange(T)` is just the position ids `[0, 1, …, T−1]`).
+
 This is a **decoder-only Transformer**. The original 2017 Transformer had two halves — an
 *encoder* (which reads a whole input at once, unmasked) and a *decoder* (which generates
 left-to-right). For pure text generation we keep only the decoder half — hence "decoder-only" —
 whose causal mask means every position only sees the past, exactly what a next-token generator
 needs. It is, to the architecture, GPT-2.
 
+**A forward shape trace** (`B=32, T=64, n_embd=128, n_layer=4, vocab=65`):
+
+```
+idx                  (32, 64)         token ids
+tok + pos embedding  (32, 64, 128)    each token → a 128-vector (content + position)
+blocks (×4)          (32, 64, 128)    refined by 4 stacked blocks — shape unchanged
+final LayerNorm      (32, 64, 128)
+lm_head (→ 65)       (32, 64, 65)     logits: a next-char score at every position
+```
+
+**How big is it?** ~817K parameters for this config. The bulk is the four blocks: each has the
+attention (q/k/v projections + the output projection ≈ 66K) plus the feed-forward net
+(`128→512→128` ≈ 131K) ≈ ~197K per block × 4 ≈ 790K, with the embeddings (`65×128 + 64×128` ≈ 17K)
+and output head (`128×65` ≈ 8K) making up the rest. That's *tiny* — GPT-3 has 175 **billion** — but
+the architecture is byte-for-byte the same; only the numbers grow.
+
+It's worth pausing on what you've built. The 2017 paper that introduced this was titled *"Attention
+Is All You Need"*, and the claim held up: this one architecture, scaled, swept aside the specialized
+models that came before it — first in language, later in vision, audio, and code. The reasons are
+exactly the ones you've now seen: attention's parallel, long-range routing (Chapter 4) plus the
+residual + LayerNorm scaffolding that makes it stackable to great depth. Everything from here
+(Chapters 6–17) makes *this* model bigger, faster, better-fed, and better-behaved — it never
+replaces it.
+
 ---
 
 ## 7. A note on dropout
 
 The reference code also sprinkles in **`nn.Dropout`** — during training it randomly zeroes a
-fraction of activations, which prevents the model from over-relying on any one path
-(regularization, fighting the overfitting you saw in Chapter 3's exercise). It's off
-automatically at generation time. One line per sublayer; you can ignore it on a first read.
+fraction (say 20%) of activations on each forward pass, then scales the rest up to compensate. Why
+deliberately break things? Because it stops the model from over-relying on any single path or
+neuron — every unit has to pull its weight, since it can't count on its neighbours always being
+there. That's **regularization**: it fights the overfitting you met in Chapter 3 (a model
+memorizing the training set instead of learning general patterns). Crucially, dropout is **off at
+generation time** — `model.eval()` switches it off; you only want the noise while *learning*. One
+line per sublayer, and safe to ignore on a first read, but it's a standard part of the recipe.
 
 ---
 
 ## 8. Train it, and read the result
+
+We train it exactly as before — the same reset → backward → update loop with **AdamW**, on random
+chunks of Shakespeare, for a few thousand steps (~2 minutes on a laptop). The *only* difference from
+Chapter 4 is that the model is now a stack of blocks instead of one head. Then we read both the loss
+and the samples.
 
 > 🔮 **Predict before you run:** Chapter 4's single head got **2.34**. With multi-head +
 > feed-forward + 4 stacked blocks, where does the val loss land?
@@ -269,8 +410,49 @@ Their tagent comp noblers!
 
 Compare that to Chapter 4's `POr, Coll. I Tshat ke`. We now have **speaker names**, line
 breaks, dialogue, capitalization, and word-shaped words — recognizably (broken) English, from
-a model that has only ever seen characters. The same architecture, scaled up on a GPU and
+a model that has only ever seen characters.
+
+Read it closely and you can see *which* patterns it picked up: the `NAME:` line format (it learned
+the dialogue structure), capital letters after newlines, spaces clustering letters into word-sized
+chunks, even plausible letter runs (`musterford`, `noblers`). What it *hasn't* learned is meaning —
+the words are mostly non-words — because at this size, with single-character tokens, it can capture
+*form* but not *content*. Closing that gap is exactly what scale and subword tokens (Chapter 6)
+begin to do. The same architecture, scaled up on a GPU and
 trained longer (Chapters 7–10), is what writes fluent text.
+
+**How does it actually generate?** The same autoregressive loop as Chapters 1, 3, and 4 — only the
+next-token distribution now comes from the GPT. Start from a seed token, run the model, take the
+logits at the *last* position, softmax to probabilities, sample one token, append it, repeat:
+
+```python
+for _ in range(max_new_tokens):
+    logits = model(idx[:, -block_size:])          # crop to the last block_size tokens
+    probs  = F.softmax(logits[:, -1, :], dim=-1)  # distribution for the NEXT token
+    idx_next = torch.multinomial(probs, 1)        # sample one
+    idx = torch.cat([idx, idx_next], dim=1)       # append it, and loop
+```
+
+The one new wrinkle is `idx[:, -block_size:]`: the model has a *fixed* context window, so we feed it
+only the most recent `block_size` tokens. Run this 500 times and out comes the Shakespeare above —
+one character at a time, each conditioned on everything generated so far.
+
+---
+
+## 🐛 Building it yourself: what trips people up
+
+- **Forgetting the residual `+`.** Writing `x = self.sa(self.ln1(x))` instead of
+  `x = x + self.sa(self.ln1(x))` silently drops the skip connection. It still *runs* — and even
+  trains OK at 4 layers — so the bug hides until you go deeper. (The notebook's check catches it.)
+- **`head_size` must divide `n_embd`.** With `n_embd=64` and 4 heads, `head_size=16` and the
+  concatenation comes back to 64. A head count that doesn't divide evenly breaks the shapes.
+- **Pre-norm vs post-norm.** Normalize *before* the sublayer (`x + sa(ln(x))`), not after
+  (`ln(x + sa(x))`). Both "work," but pre-norm is far more stable for deep stacks — it's what GPT-2
+  settled on.
+- **Dropout left on at generation.** Dropout should act only during training. PyTorch toggles it
+  via `model.train()` / `model.eval()`; forget to switch to `eval()` and your samples come out
+  randomly corrupted.
+- **The `(B, T, C)` shape, again.** As in Chapter 4, most bugs here are shape bugs. A block *must*
+  return the same `(B, T, C)` it received, or the next block — and the residual `+` — will choke.
 
 ---
 
@@ -291,6 +473,23 @@ trained longer (Chapters 7–10), is what writes fluent text.
   core you just built is the same.
 - **Why is the text still broken?** Small model (817K params), short training, and *character*
   tokens. Bigger + longer + subword tokens (Chapter 6) sharpen it dramatically.
+- **Why does the feed-forward net widen to 4× and back?** The wide middle gives the network room to
+  compute richer per-token features than the input size allows; projecting back to `n_embd` keeps a
+  block's output the same shape as its input so blocks stack. `4×` is the original Transformer's
+  ratio.
+- **How many heads / layers should I use?** Hyperparameters. More heads = more kinds of
+  relationship tracked at once; more layers = more rounds of communicate-then-think (more capacity,
+  but harder to train without the residual+norm scaffolding). Our config uses 4 of each; GPT-2 used
+  12 and 12, GPT-3 used 96 and 96.
+- **Where does the actual "understanding" live?** Spread across all of it: attention routes
+  information, the feed-forward nets transform it, and stacking blocks lets later ones build on
+  patterns earlier ones found. No single piece "understands" — the *stack* does.
+- **Does the position embedding work the same as in Chapter 4?** Yes — `nn.Embedding(block_size,
+  n_embd)` added to the token embedding, so each token knows *where* it is. Bigger models sometimes
+  use fancier schemes (rotary, ALiBi), but the idea is identical.
+- **What's the `lm_head`?** The final `nn.Linear(n_embd, vocab_size)` that turns each token's
+  refined vector into `vocab_size` logits — one score per possible next token, just like every model
+  since Chapter 1. The final LayerNorm right before it keeps those inputs tame.
 
 ---
 
@@ -327,6 +526,27 @@ Different heads can specialize in different relationships (subject-verb, punctua
 start, …) and attend to several of them simultaneously; a projection then mixes their findings.
 One head can only express one attention pattern at a time.
 </details>
+
+<details>
+<summary>5. A Transformer block takes <code>(B, T, C)</code> in — what shape does it return, and why does that matter?</summary>
+
+`(B, T, C)` — the *same* shape. That's exactly what lets you stack blocks: each block's output is a
+valid input to the next. A block refines the representation without changing its shape.
+</details>
+
+## 🧭 The journey so far
+
+Every model we've trained on Shakespeare, by validation loss:
+
+| Chapter | Model | Val loss |
+|---------|-------|---------:|
+| 4 | bigram baseline | ~2.5 |
+| 4 | one attention head | 2.34 |
+| **5** | **full GPT** (4 heads × 4 blocks + FFN + residual + LayerNorm) | **1.81** |
+
+And the *text* went from `POr, Coll. I Tshat ke` to speaker names and dialogue. Every drop came from
+the same recipe — *more capacity, better wired* — and the road ahead (Chapters 6–10) is more of it:
+subword tokens, a GPU, more data, more layers.
 
 ## 🎓 Key takeaways
 
