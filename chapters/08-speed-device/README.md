@@ -35,7 +35,8 @@ CPU/Apple-GPU paths; a free Colab GPU to feel the CUDA speedup.
 
 Reference code: [`code/benchmark.py`](./code/benchmark.py) (the CPU-vs-GPU speedup) and
 [`code/device_train.py`](./code/device_train.py) (the device-agnostic training loop). Both run
-anywhere; on a GPU they light up.
+anywhere; on a GPU they light up. The *ideas* (device, transfer, sync, VRAM) are identical on every
+machine — only the speedup needs a GPU to actually *see*, which is what Colab is for.
 
 ---
 
@@ -48,6 +49,24 @@ once. Two very different chips:
 - A **CPU** has a handful of big, fast cores (great for sequential logic).
 - A **GPU** has *thousands* of small, slower cores (great for doing the same simple thing to a lot
   of data at once).
+
+An analogy: the CPU is a few math professors — each brilliant and fast, able to follow complicated
+sequential reasoning. The GPU is a stadium of ten thousand schoolchildren who can each only multiply
+two numbers. Ask for one hard, step-by-step calculation and the professors win easily. Ask for a
+million *independent* multiplications — exactly what a matmul is — and the stadium finishes in the
+time it takes one professor to clear their throat. Neural nets are almost entirely the second kind
+of work, which is why they live on GPUs.
+
+None of this makes the CPU obsolete — it's the right tool for sequential logic, small data, and
+orchestrating the whole program (including telling the GPU what to do). The GPU is a *co-processor*
+you hand the parallel-heavy parts to, not a replacement.
+
+|              | CPU                          | GPU                              |
+|--------------|------------------------------|----------------------------------|
+| **Cores**    | a handful (4–32), big & fast | thousands, small & slow          |
+| **Best at**  | sequential logic, branching  | the *same* op on lots of data    |
+| **A matmul** | a few cores, mostly in turn  | thousands of dot products at once |
+| **Analogy**  | a few professors             | a stadium of schoolchildren      |
 
 For a big matmul the GPU's thousands of cores crush the CPU's handful. **CUDA** is NVIDIA's system
 for programming those cores; on Colab you get an NVIDIA GPU and CUDA for free.
@@ -70,6 +89,10 @@ def get_device():
     return "cpu"                             # always works
 ```
 
+(The order matters: we check `cuda` first because an NVIDIA GPU is the fastest option and what real
+training uses; `mps` — Apple's GPU — next; and `cpu` last as the always-works fallback. `get_device`
+just returns the best thing present.)
+
 To put a tensor or a model on a device, use **`.to(device)`**. One subtle gotcha: for a **tensor**
 you must *reassign* (`x = x.to(device)`) — `x.to(device)` on its own returns a moved copy and is
 silently lost — but a **model** moves *in place*, so `model.to(device)` alone is enough:
@@ -83,6 +106,11 @@ model = MyModel().to(device)
 That's the whole abstraction. Writing `device = get_device()` once and `.to(device)` on your data
 and model is the **device-agnostic pattern**: the same code runs on a CPU, an Apple GPU, or a CUDA
 GPU on Colab — you change *nothing else*.
+
+Under the hood, `.to(device)` **copies** the tensor's numbers into that device's memory — a real
+data transfer if it crosses the CPU↔GPU boundary (see §5). That's *why* the tensor case returns a
+new tensor and the original stays put. Re-running `.to(device)` on something already there is a cheap
+no-op, so calling it defensively never hurts.
 
 ---
 
@@ -110,6 +138,12 @@ for xb, yb in loader:                     # every step:
     xb, yb = xb.to(device), yb.to(device) # move THIS batch onto the device
     loss = loss_fn(model(xb), yb)         # ...now model and data are on the same device
 ```
+
+The mental model: think of `cpu` and `cuda` as two separate workshops. An operation can only combine
+tensors that are *in the same workshop* — there's no reaching across. `.to(...)` ships a tensor to
+the other workshop. So "all tensors on the same device" really means "do the work where the data is,
+and bring any stragglers over first." Once the model lives on the GPU, every batch has to make the
+trip too — which is the loop above.
 
 ---
 
@@ -150,6 +184,27 @@ the **T4 hits ~30×** — datacenter GPUs have far more cores and **memory bandw
 can read and write their own memory). The more powerful the GPU, the smaller the work where it
 starts paying off, and the larger the eventual speedup.
 
+To feel the *scale* of parallelism: a `4096×4096` matmul computes `4096² ≈ 16.8 million` output
+numbers, each a 4096-long dot product — about **69 billion** multiply-adds. The CPU's ~8 cores grind
+through them mostly in sequence; the T4's ~2,560 cores chew thousands at once. That's the whole story
+of the ~26×, and why the gap *widens* as the matrices grow: more independent work is exactly what a
+GPU is built to swallow.
+
+When you run the project on your own hardware, the *shape* of the curve is the lesson: speedup starts
+below 1 (CPU wins — overhead dominates), crosses 1 at your **crossover size**, and climbs as the work
+grows. Where it crosses and how high it climbs is a fingerprint of your GPU — a weak laptop GPU
+crosses late and plateaus near 2×; a datacenter card crosses almost immediately and soars past 25×.
+
+One honest caveat: these are *pure matmul* numbers. Real training also runs activations, data
+loading, and the occasional CPU-bound step, so end-to-end speedups are usually a bit smaller than the
+raw matmul figure — but still the difference between hours and weeks for a large model.
+
+A subtlety worth knowing: for many workloads the bottleneck isn't the cores at all — it's **memory
+bandwidth**, how fast the GPU can read its own VRAM to feed those cores. A matmul reuses data heavily,
+so it's *compute*-bound; but many ops (activations, normalizations) touch each number once and move
+on, so they're *memory*-bound. That's why "more cores" doesn't always mean "proportionally faster,"
+and why the rest of the speed arc obsesses over *moving less data*, not just doing less math.
+
 ---
 
 ## 4. Timing GPU code honestly: `synchronize`
@@ -174,6 +229,16 @@ torch.cuda.synchronize()     # (or torch.mps.synchronize() on Apple) — block u
 Forgetting this is the most common GPU-benchmarking mistake — it makes the GPU look impossibly
 fast. (You don't normally call `synchronize` in training; it's for *timing*.)
 
+What the bug looks like in numbers: time a big matmul *without* `synchronize` and you might read
+`0.05 ms` — faster than physically possible — because you only timed how long it took to *queue* the
+work. Add `synchronize()` and the same matmul honestly reports, say, `40 ms`. That first number isn't
+"the GPU is amazing," it's "the clock stopped before the work had started."
+
+Why is the GPU asynchronous at all? So the CPU can keep *queuing* the next operations while the GPU
+chews through the current ones — the two run in parallel instead of the CPU sitting idle. It's a
+feature, not a quirk; it only becomes a trap when you *time* something and forget the work is still
+in flight.
+
 ---
 
 ## 5. The cost of moving data
@@ -183,9 +248,16 @@ CPU↔GPU boundary (`.to(device)`, `.cpu()`, `.item()`, `print(tensor)`) is **sl
 compute. Two habits follow:
 
 - **Keep data on the GPU.** Move a batch over once, do all the work there. Don't bounce tensors
-  back and forth.
+  back and forth. (A classic slow pattern: compute on the GPU, pull the result to the CPU to do one
+  small thing, push it back — three boundary crossings where zero were needed.)
 - **Don't `.item()` / `.cpu()` in the hot loop** (the per-step inner training loop). Pulling the
   loss back to the CPU *every step* to print it forces a sync and a transfer; do it every N steps.
+
+How slow is "slow"? Moving a tensor across the bus between CPU and GPU runs at maybe ~10 GB/s, while
+the GPU *computes* at teraflops. So copying a 100 MB batch costs ~10 ms — about the same as a sizable
+matmul. Do that once per step and it's invisible; do it several times per step (a stray `.item()`, a
+`print`, bouncing data back and forth) and transfer can dominate your runtime even though "the GPU
+is fast."
 
 A surprising amount of "my GPU training is slow" is really "I'm copying data across the boundary
 too often."
@@ -196,10 +268,27 @@ too often."
 
 A GPU's memory (**VRAM**) holds the model's parameters, the optimizer state, *and* the
 activations saved for backprop — and it's limited (Colab's T4 has 16 GB; a laptop GPU often less).
-Run out and you get the dreaded **`CUDA out of memory`**. The knobs that use less: a **smaller
+Run out and you get the dreaded **`CUDA out of memory`**.
+
+A quick way to estimate: each parameter is **4 bytes** (fp32), so a 1-billion-parameter model needs
+~4 GB just for weights — then roughly *another* 4 GB for gradients, ~8 GB for AdamW's two optimizer
+states (`m` and `v` from Chapter 7), plus the activations saved for backprop. That's why a "1B model"
+can need ~16–20 GB to *train* but only ~2–4 GB to *run* (inference needs no gradients, no optimizer
+state, no saved activations). Chapter 9's half-precision roughly halves every one of those.
+
+The knobs that use less: a **smaller
 batch size**, a **smaller model**, and tricks from later chapters (mixed precision in
 [Chapter 9](../09-speed-precision/), which roughly halves it). For this course's models, a free
 Colab GPU has memory to spare.
+
+Picture two separate pools: your computer's **RAM** (where data is loaded) and the GPU's **VRAM**
+(where the model trains) — the same boundary that makes transfers slow in §5. When you hit `CUDA out
+of memory`, the usual fixes, in order: halve the batch size (cheapest knob, usually enough), shrink
+the model, or reach for Chapter 9's mixed precision. The error often appears a few steps *in* rather
+than immediately — because it's the first **backward** pass that allocates all the saved-activation
+memory. The full message reads something like `CUDA out of memory. Tried to allocate 2.00 GiB (GPU 0;
+15.78 GiB total capacity; 14.9 GiB already allocated; ...)` — it tells you how much it *wanted* and
+how much was *free*, which is your clue for how much to trim.
 
 ---
 
@@ -212,11 +301,28 @@ run together) and a **grid** (all the blocks for the job) — the structure you'
 *wrote* a kernel, as in the project's stretch.) When you call
 `a @ b` on a `cuda` tensor, PyTorch launches a highly-optimized matmul *kernel* for you.
 
+Picture it for a GELU over a million numbers (the project's stretch kernel): you launch a million
+threads, one per element; thread `i` reads `x[i]`, computes `gelu(x[i])`, and writes `out[i]`. The
+threads are grouped into blocks of, say, 256, so the grid is `1,000,000 / 256 ≈ 3,907` blocks. Every
+thread runs the *same* one-line formula on *different* data — that "same instruction, many data"
+shape is precisely what the hardware accelerates, and it's why writing a kernel is mostly "compute
+element `i`" plus a little bookkeeping to work out *which* `i` each thread is.
+
 You don't have to *write* CUDA to use a GPU — `.to("cuda")` and PyTorch's built-in kernels get you
 the speedup. But you *can* write your own: PyTorch can compile an inline CUDA kernel at runtime
 (`torch.utils.cpp_extension.load_inline`), which is the project's stretch goal — and exactly what
-the deeper speed chapters build on. (`mps` is Apple's equivalent; `ROCm` is AMD's. PyTorch hides
+the deeper speed chapters build on. In practice you'll write a kernel roughly *never* — PyTorch's
+built-ins cover almost everything and are faster than what you'd hand-write — so the stretch exists to
+*demystify* the layer beneath `a @ b`, not because you'll need it. But seeing that a kernel is "just a
+function each thread runs on one element" takes the magic out of CUDA, and is the doorway to `llm.c`
+and the frontier work later in the course. (`mps` is Apple's equivalent; `ROCm` is AMD's. PyTorch hides
 them all behind the same `device`.)
+
+Between your `a @ b` and the silicon sits a stack: PyTorch calls into NVIDIA's libraries (**cuBLAS**
+for matmuls, **cuDNN** for neural-net ops), which dispatch hand-tuned kernels for your exact GPU. You
+stand on years of low-level optimization every time you write one line of tensor code — which is why
+"just use PyTorch's built-ins" beats hand-rolling almost always, right up until you reach the
+frontier where `llm.c` and custom kernels live.
 
 ---
 
@@ -225,6 +331,31 @@ them all behind the same `device`.)
 Nothing about your GPT changes — you write `device = get_device()`, `.to(device)` the model and
 each batch, and the *same* Chapter 5 code now trains on a GPU many times faster. That's what makes
 the later chapters (bigger models, more data) practical: the speed to actually train them.
+
+This is the first of the **speed arc**. Chapter 8 is *where* compute happens (the device); Chapter 9
+is *how precisely* you compute (fp16/bf16 — ~2× faster, half the memory); Chapter 10 is *across how
+many* devices (multi-GPU). Together they're the difference between training a toy and training
+something real — the same Chapter 5 architecture, just run fast enough to matter.
+
+---
+
+## 🐛 Building it yourself: what trips people up
+
+The GPU gotchas are a rite of passage — here are the ones that bite first:
+
+- **The same-device error.** "Expected all tensors to be on the same device" almost always means a
+  batch is still on the CPU while the model is on the GPU. Move *each batch* inside the loop:
+  `xb, yb = xb.to(device), yb.to(device)`.
+- **`x.to(device)` silently does nothing.** For a **tensor** you must *reassign* —
+  `x = x.to(device)` — because `.to` returns a *moved copy*. (A **model** moves in place, so
+  `model.to(device)` alone is fine. The asymmetry trips everyone once.)
+- **Timing without `synchronize()`.** You'll measure launch time, not compute time, and conclude your
+  GPU is 1000× faster than it is. Sync before you stop the clock.
+- **`.item()` in the inner loop.** Each call forces a CPU↔GPU sync. Accumulate on the GPU and only
+  pull the number across every N steps.
+- **`CUDA out of memory` mid-run.** Often the *batch size* is too big — or you're holding onto
+  tensors (appending `loss` instead of `loss.item()` to a list keeps the whole computation graph
+  alive). Smaller batches and `.item()`-ing logged values fix most cases.
 
 ---
 
@@ -242,6 +373,15 @@ the later chapters (bigger models, more data) practical: the speed to actually t
   smaller) speedup; the device-agnostic code treats it just like CUDA.
 - **Is the speedup really 50×?** On a big model and a datacenter GPU, yes; on a laptop's
   integrated GPU it's more like 2×. It scales with the GPU and the size of the work.
+- **CPU, CUDA, MPS — do I write different code for each?** No — that's the whole point of the
+  device-agnostic pattern: `get_device()` picks the best available, `.to(device)` moves things, and
+  the rest of your code is identical. Write once, run anywhere.
+- **Why is moving data so slow when the GPU is so fast?** The GPU is fast at *computing* on data it
+  already holds; getting data *to* it crosses a relatively narrow bus. Compute is cheap, movement is
+  expensive — the opposite of most people's intuition, and the theme of the whole speed arc.
+- **Does a GPU make a *small* model train faster?** Not necessarily — for tiny work the launch
+  overhead can let the CPU win (the crossover). GPUs pay off once the work per step is big enough to
+  keep thousands of cores busy.
 
 ## ✅ Check your understanding
 
@@ -272,6 +412,22 @@ impossibly fast.
 
 A smaller batch size and a smaller model (also: mixed precision, Chapter 9). VRAM holds
 parameters, optimizer state, and saved activations — all of which shrink with those.
+</details>
+
+<details>
+<summary>5. Why does <code>x.to(device)</code> sometimes "do nothing," while <code>model.to(device)</code> works?</summary>
+
+For a **tensor**, `.to(device)` returns a *moved copy* and leaves the original alone — you must
+reassign: `x = x.to(device)`. A **model** (`nn.Module`) moves its parameters *in place*, so
+`model.to(device)` on its own is enough. Forgetting to reassign a tensor is a classic silent bug.
+</details>
+
+<details>
+<summary>6. You time a GPU matmul at 0.05 ms — faster than physically possible. What happened?</summary>
+
+You forgot `synchronize()`. GPU calls are asynchronous, so you measured how long it took to *queue*
+the work, not to *run* it. Call `torch.cuda.synchronize()` before stopping the clock for an honest
+number.
 </details>
 
 ## 🎓 Key takeaways

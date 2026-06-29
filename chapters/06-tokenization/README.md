@@ -53,6 +53,13 @@ choices:
   because we start from raw bytes, **nothing is ever out-of-vocabulary** — the worst case is
   falling back to single bytes. Fixed vocab, short-ish sequences, no dead ends.
 
+To make the trade-off concrete, take the word `"tokenization"`. As **characters** it's 12 tokens —
+the model re-spells it every time. As a **whole word** it's 1 token, but the vocabulary needs a slot
+for it *and* `"tokenizing"`, `"tokenized"`, `"tokenizer"`, … and breaks on any word it never saw. As
+**subwords**, a good BPE tokenizer splits it into maybe `token` + `ization` — 2 tokens that reuse
+pieces appearing in thousands of other words, and it's never stuck on a new word because it can
+always fall back to smaller pieces. Short, shareable, and unbreakable: that's the win.
+
 BPE is how we *build* a subword vocabulary, automatically, from data. Here's the whole idea in
 one sentence: **start with bytes, then repeatedly merge the most frequent adjacent pair into a
 new token, until the vocabulary is as big as you want.**
@@ -83,6 +90,11 @@ byte-values are our **starting vocabulary** (tokens `0`–`255`), and BPE grows 
 > `list(b"hi")` → `[104, 105]` (bytes to ints); `bytes([104, 105])` → `b"hi"` (ints to bytes);
 > `b"hi" + b"!"` → `b"hi!"` (glue two with `+`); `b"".join([b"hi", b"!"])` → `b"hi!"` (glue a
 > list); and `b"hi".decode("utf-8")` → `"hi"` (bytes back to text). That's the whole toolkit.
+
+Why is `h` one byte but the wizard four? UTF-8 spends just **1 byte** on the ~128 most common
+characters (ASCII — English letters, digits, basic punctuation) and **2–4 bytes** on everything else
+(accents, other scripts, emoji). So English text is mostly one byte per character, which is why a
+megabyte of Shakespeare starts as about a million byte-tokens — before BPE merges any of them.
 
 ---
 
@@ -135,6 +147,11 @@ We walk the list with an index `i`. When the next two tokens are the pair, we ap
 and jump **two** forward; otherwise we copy one token and step **one** forward. (The
 `i < len(ids) - 1` guard stops us reading past the end when checking `ids[i+1]`.)
 
+Step through `merge([1, 2, 1, 2, 3], (1,2), 99)`: at `i=0` the next two are `(1,2)` — a match — so
+append `99` and jump to `i=2`; at `i=2` it's `(1,2)` again → append `99`, jump to `i=4`; at `i=4`
+there's no `i+1`, so copy `3` and stop. Result: `[99, 99, 3]`. That `i += 2` after a match is exactly
+what stops a freshly-merged token from being re-examined.
+
 ---
 
 ## 4. Training: merge, and repeat
@@ -174,6 +191,31 @@ b'e' + b' '  ->  b'e '        b't' + b'h'  ->  b'th'
 b't' + b' '  ->  b't '        b'o' + b'u'  ->  b'ou'
 ```
 
+**Watch it run on a tiny string.** Take `aaabdaaabac` (11 characters). Count the pairs: `aa` appears
+4 times, `ab` twice, the rest once — so `aa` wins. **Merge 1:** call the new token `Z = aa` and
+replace every `aa`:
+
+```
+a a a b d a a a b a c   →   Z a b d Z a b a c       (11 tokens → 9;  Z = "aa")
+```
+
+Count again on the *new* sequence: now `Za` and `ab` each appear twice. **Merge 2:** take `Y = Za`
+(so `Y` stands for `"aaa"`):
+
+```
+Z a b d Z a b a c   →   Y b d Y b a c               (9 → 7;  Y = "aaa")
+```
+
+Two merges shrank 11 tokens to 7 and invented two new "words," `aa` and `aaa`. Keep going to your
+`vocab_size` and the tokens grow into whatever chunks your text repeats most — on Shakespeare, `th`,
+`e `, ` the`, eventually whole names. That loop, run on a megabyte of text, *is* training a
+tokenizer.
+
+(A bit of history: BPE didn't start in NLP — it's a 1994 *data-compression* algorithm, repurposed
+for tokenization by Sennrich et al. in 2016. The original goal was literally to shrink files by
+replacing common byte-pairs with new symbols; turning frequent chunks into single tokens is the very
+same trick, now serving a language model instead of a zip file.)
+
 ---
 
 ## 5. Encoding new text
@@ -207,6 +249,13 @@ and pushes all non-merges to the back. When even the `min` isn't in `merges`, no
 merge-able and we stop. (We re-`get_stats` each loop only to know *which pairs are present*; the
 counts don't matter here — the merge order does.)
 
+**A worked encode.** Suppose training learned `th → 256` (early) and later `the → 257` (built from
+`256` + `e`). To encode `"the"` — bytes `[t, h, e]`: the present pairs are `(t,h)` and `(h,e)`, and
+only `(t,h)` is a merge (id 256), so `min` picks it → `[256, e]`. Now the one pair is `(256, e)`,
+which is merge 257 → `[257]`. Done — `"the"` collapses to a *single* token. And it *had* to apply
+`th` before `the`: replaying merges oldest-first is what lets the late tokens build on the early
+ones.
+
 ---
 
 ## 6. Decoding
@@ -227,6 +276,17 @@ original text, exactly — for *any* string, including emoji and accents (that's
 working in bytes). (`errors="replace"` guards the rare case of decoding an arbitrary token
 sequence that isn't valid UTF-8; for real round-trips it never triggers.)
 
+**A worked decode** of `[257]` with that vocab: look up `vocab[257]` — the bytes `the` was built
+from, `b"the"` — and `b"the".decode("utf-8")` gives `"the"`. Decoding never needs the merge *rules*,
+only the `vocab` table mapping each id to its bytes, so it's a plain lookup-and-glue: fast, and
+trivially reversible.
+
+That's the **whole tokenizer in five short functions**: `get_stats` (count adjacent pairs), `merge`
+(replace one pair with a new id), `train` (loop those to build `merges` + `vocab`), `encode` (replay
+the merges on new text), and `decode` (look up each id's bytes and glue). No neural net, no training
+loop, no gradients — just counting and replacing. The same five functions, trained on far more text
+to a far bigger vocab, are GPT-4's tokenizer.
+
 ---
 
 ## 7. Vocabulary size vs. compression
@@ -246,6 +306,19 @@ size — with diminishing returns:
 This is the core trade-off. **Bigger vocab** → shorter sequences (cheaper, longer effective
 context) but a fatter embedding table and rarer tokens that are harder to learn. Real models
 pick a sweet spot: GPT-2 uses **50,257** tokens (~4× compression on English), GPT-4 ~**100k**.
+
+Why does compression matter beyond saving tokens? Two reasons. **Compute:** a Transformer's
+attention cost grows with sequence *length* (the `T²` from Chapter 4), so halving the token count
+roughly *quarters* the attention work. **Context:** a fixed `block_size` of, say, 1024 tokens covers
+1024 characters at the character level but ~3–4× more actual *text* at the subword level — so the
+model effectively remembers further back. Fewer tokens for the same text means faster training *and*
+longer memory, which is why every serious model tokenizes.
+
+For a feel: `"the cat sat on the mat"` is 22 bytes, so a character-level model sees 22 tokens. A BPE
+tokenizer that learned chunks like ` the`, ` cat`, `at`, ` sat` might encode it in ~10 tokens — a
+~2× shrink on this short snippet, and more on longer text where common words repeat. Multiply that
+across a training set of billions of characters and the savings, in both compute and effective
+context length, are enormous.
 
 ---
 
@@ -282,6 +355,13 @@ not `"the"`). You don't have to be able to *write* regex like this — just reco
 text into words, numbers, punctuation, and spaces. The reference code's `RegexTokenizer` does
 exactly this; you'll wire it up in the exercises.
 
+The difference shows up immediately. *Without* splitting, BPE's first Shakespeare merge is
+`'e' + ' '` → `'e '` — gluing a letter to the *next* space. *With* GPT-2's split, that can't happen
+(a space stays attached to the word that *follows* it), so the first merges become clean
+word-pieces like `' t'`, `' a'`, `' the'`. Splitting costs a sliver of raw compression but buys
+tokens that respect word boundaries — which is what real models want: `"dog"`, `"dog."`, and
+`"dog!"` now all share the `dog` piece instead of becoming three unrelated tokens.
+
 ---
 
 ## 9. Real tokenizers, and their famous quirks
@@ -299,8 +379,26 @@ weirdness:
   same sentence is "more expensive" in some languages.
 - **Glitch tokens** like the infamous `SolidGoldMagikarp` — rare strings that got a token but
   almost no training — make models behave bizarrely.
+- **Capitalization splits tokens** — `"The"` and `"the"` are usually *different* tokens, and a
+  shout like `"HELLO"` may shatter into several, because uppercase runs are rarer in training text.
+- **A token is neither a character nor a word** — it's whatever chunk BPE found useful, so "how many
+  tokens is this?" rarely matches intuition. (A word like `"strawberry"` becomes a couple of tokens,
+  not letters — part of why models miscount the `r`s in it.)
 
 Every one of these is a tokenization artifact, not a reasoning failure.
+
+In production you'd never train a tokenizer from a Python loop on each run — you train it *once* on a
+huge corpus, save the `merges` and `vocab`, and load them instantly (that's what
+`tiktoken.get_encoding("cl100k_base")` hands you for GPT-4). The fast libraries also heavily optimize
+the inner loop — our `encode` re-counts every pair each step, fine for learning but slow at scale —
+and are written in Rust. The *algorithm*, though, is exactly the one you just built; only the
+engineering differs.
+
+One thing real tokenizers add that ours doesn't: **special tokens** — reserved ids like
+`<|endoftext|>` that *aren't* built by merging bytes but instead mark structure (a document
+boundary, the start of a reply, the end of a turn). They get their own fixed ids above the BPE
+vocabulary. You'll meet them again in the chat-format and fine-tuning chapters, where
+`<|user|>` / `<|assistant|>`-style markers are what tell the model whose turn it is.
 
 ---
 
@@ -311,6 +409,33 @@ sequence holds **~2–4× more text** (so the same `block_size` sees more contex
 predicts **word-like units** instead of letters — both make the generated text sharper. The
 plumbing (an `nn.Embedding` of size `vocab_size`) is unchanged; only `vocab_size`, `encode`, and
 `decode` differ. That swap is the mini-project's stretch goal.
+
+In practice the swap is small: train a BPE tokenizer on your text, set the GPT's `vocab_size` to the
+tokenizer's (say 1024 instead of 65), encode the whole dataset to token ids *once*, and train
+exactly as in Chapter 5 — the model never knows the difference; it just sees a stream of integer
+ids. At generation time you `decode` the ids it produces back into text. Everything in between —
+embeddings, blocks, the loss — is untouched. That clean separation (tokenizer ↔ model) is precisely
+why you can change tokenizers without changing the architecture.
+
+---
+
+## 🐛 Building it yourself: what trips people up
+
+Pure Python, but a few snags:
+
+- **The `merge` loop's index dance.** On a *match* you consume two tokens, so jump `i += 2`; writing
+  `i += 1` re-scans the token you just merged. (The notebook even seeds the blank so an unfilled cell
+  can't infinite-loop.)
+- **Encoding in the wrong order.** Picking the *most frequent* present pair instead of the
+  *earliest-learned* one (the `min` trick) gives a different, wrong tokenization — and the round-trip
+  *still passes*, so the bug hides. Always replay merges oldest-first.
+- **Bytes vs strings.** `vocab[idx]` holds `bytes` (`b"the"`), not a `str`. Glue them with
+  `b"".join(...)` and `.decode()` only at the *very end* — decoding piece by piece can split a
+  multi-byte character down the middle and crash.
+- **`max(stats, key=stats.get)`** hands `max` the method *uncalled* (no parentheses), so it can call
+  it on each pair. Adding `()` is a common reflex that errors.
+- **Off-by-one in `train`.** `num_merges = vocab_size - 256`, because you start with 256 byte-tokens.
+  Forget the `- 256` and you'll merge far too many times.
 
 ---
 
@@ -327,6 +452,15 @@ plumbing (an `nn.Embedding` of size `vocab_size`) is unchanged; only `vocab_size
   `RegexTokenizer` here, just trained to ~100k tokens on far more text.
 - **Does a bigger vocab always win?** No — it shortens sequences but inflates the embedding table
   and creates rarer tokens that are harder to learn. It's a trade-off (§7).
+- **How long does training a tokenizer take?** Seconds to minutes at our sizes — it's just counting
+  and replacing, no gradients. Production tokenizers train on huge corpora but only *once*, then ship
+  the fixed `merges`/`vocab` (that's what `tiktoken` loads).
+- **Why is the tokenizer trained *separately* from the model?** It has nothing to learn by gradient
+  descent — it's a fixed preprocessing step. You build the vocabulary once from data, then the model
+  trains on the resulting token ids. Change the tokenizer and you must retrain the model.
+- **Could two different texts encode to the same tokens?** No — encoding is deterministic and
+  decoding is a pure lookup, so `decode(encode(x))` is always exactly `x`. The mapping is lossless
+  both ways — that's the round-trip test.
 
 ## ✅ Check your understanding
 
@@ -359,6 +493,23 @@ so we always merge the earliest-learned available pair first.
 Bigger vocab → more compression → shorter sequences (cheaper compute, longer effective context),
 **but** a larger embedding table and rarer tokens that are harder for the model to learn well. You
 pick a sweet spot (GPT-2: ~50k).
+</details>
+
+<details>
+<summary>5. Why is <code>decode(encode(text)) == text</code> guaranteed for *any* string, even emoji?</summary>
+
+Because everything happens on **bytes**. `encode` turns text into UTF-8 bytes (always valid, for any
+character) then only *merges* them, and `decode` un-merges back to those exact bytes and decodes the
+UTF-8. No information is lost in either direction — unseen characters just fall back to single-byte
+tokens.
+</details>
+
+<details>
+<summary>6. Why is the tokenizer trained separately from the model, and only once?</summary>
+
+It has nothing to learn by gradient descent — it's a fixed preprocessing step that turns text into
+token ids. You build the vocabulary once from data and ship the `merges`/`vocab`; the model then
+trains on the resulting ids. (Change the tokenizer and you'd have to retrain the model.)
 </details>
 
 ## 🎓 Key takeaways
