@@ -1,0 +1,48 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# --- ML / training artifacts ---
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.gguf
+wandb/
+runs/
+logs/
+checkpoints/
+out/
+*.log
+
+# --- Large data (keep small sample datasets that ship with chapters) ---
+# By default we ignore big downloads; small curated files are force-added per chapter.
+data/cache/
+*.tar.gz
+*.zip
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

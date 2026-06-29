@@ -1,0 +1,24 @@
+# Core dependencies for "Road to Understanding LLMs"
+# ---------------------------------------------------
+# Tested with Python 3.13 on macOS (Apple Silicon). The pinned-version comments
+# show exactly what the course was verified against; the >= lets you move forward.
+#
+# Recommended install (fast, uses uv):
+#     uv venv --python 3.13 .venv
+#     uv pip install -r requirements.txt
+#
+# Or with plain pip:
+#     python3 -m venv .venv
+#     source .venv/bin/activate        # Windows: .venv\Scripts\activate
+#     pip install -r requirements.txt
+
+torch>=2.2            # the deep-learning workhorse (tested: 2.12.1)
+numpy>=1.26           # array math (tested: 2.5.0)
+matplotlib>=3.8       # plots & visualizations (tested: 3.11.0)
+
+# Notebooks — for the interactive `explore.ipynb` lesson in each chapter
+jupyterlab>=4.0       # run notebooks in the browser (tested: 4.x)
+ipykernel>=6.29       # the Python kernel notebooks run on
+
+# Later chapters introduce more libraries (datasets, tokenizers, fastapi, ...).
+# We add them chapter-by-chapter so this file stays minimal and fast to install.
