@@ -49,3 +49,6 @@ Thumbs.db
 
 # generated plots
 *.png
+
+# generated samples (project artifacts)
+my_first_gpt.txt
