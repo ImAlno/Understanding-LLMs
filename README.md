@@ -65,7 +65,7 @@ optionally watch the matching Karpathy video.
 | 04 | [Attention](./chapters/04-attention/) | attention, softmax, positional encoding | ✅ |
 | 05 | [Transformer](./chapters/05-transformer/) | the Transformer, residuals, LayerNorm, GPT-2 | ✅ |
 | 06 | [Tokenization](./chapters/06-tokenization/) | minBPE, byte-pair encoding | ✅ |
-| 07 | [Optimization](./chapters/07-optimization/) | initialization, optimization, AdamW | 🗓️ |
+| 07 | [Optimization](./chapters/07-optimization/) | initialization, optimization, AdamW | ✅ |
 | 08 | [Need for Speed I: Device](./chapters/08-speed-device/) | CPU, GPU, CUDA, devices | 🗓️ |
 | 09 | [Need for Speed II: Precision](./chapters/09-speed-precision/) | mixed precision, fp16, bf16, fp8 | 🗓️ |
 | 10 | [Need for Speed III: Distributed](./chapters/10-speed-distributed/) | distributed training, DDP, ZeRO | 🗓️ |
