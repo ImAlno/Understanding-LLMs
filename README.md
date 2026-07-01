@@ -69,7 +69,7 @@ optionally watch the matching Karpathy video.
 | 08 | [Need for Speed I: Device](./chapters/08-speed-device/) | CPU, GPU, CUDA, devices | ✅ |
 | 09 | [Need for Speed II: Precision](./chapters/09-speed-precision/) | mixed precision, fp16, bf16, fp8 | ✅ |
 | 10 | [Need for Speed III: Distributed](./chapters/10-speed-distributed/) | distributed training, DDP, ZeRO | ✅ |
-| 11 | [Datasets](./chapters/11-datasets/) | data loading, synthetic data, TinyStories | 🗓️ |
+| 11 | [Datasets](./chapters/11-datasets/) | data loading, synthetic data, TinyStories | ✅ |
 | 12 | [Inference I: KV-cache](./chapters/12-inference-kv-cache/) | the KV cache | 🗓️ |
 | 13 | [Inference II: Quantization](./chapters/13-inference-quantization/) | quantization (int8, GPTQ, AWQ) | 🗓️ |
 | 14 | [Finetuning I: SFT](./chapters/14-finetuning-sft/) | supervised finetuning, PEFT, LoRA, chat | 🗓️ |

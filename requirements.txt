@@ -16,6 +16,8 @@ torch>=2.2            # the deep-learning workhorse (tested: 2.12.1)
 numpy>=1.26           # array math (tested: 2.5.0)
 matplotlib>=3.8       # plots & visualizations (tested: 3.11.0)
 regex>=2024.0         # Chapter 6: GPT-style tokenizer text-splitting (tested: 2026.6.28)
+# datasets>=2.0       # Chapter 11: OPTIONAL — only to load the *real* TinyStories; the chapter's
+                      # own pipeline is fully self-contained (synthetic corpus, no download).
 
 # Notebooks — for the interactive `explore.ipynb` lesson in each chapter
 jupyterlab>=4.0       # run notebooks in the browser (tested: 4.x)
