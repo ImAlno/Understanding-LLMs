@@ -73,7 +73,7 @@ optionally watch the matching Karpathy video.
 | 12 | [Inference I: KV-cache](./chapters/12-inference-kv-cache/) | the KV cache | ✅ |
 | 13 | [Inference II: Quantization](./chapters/13-inference-quantization/) | quantization (int8, GPTQ, AWQ) | ✅ |
 | 14 | [Finetuning I: SFT](./chapters/14-finetuning-sft/) | supervised finetuning, PEFT, LoRA, chat | ✅ |
-| 15 | [Finetuning II: RL](./chapters/15-finetuning-rl/) | RLHF, PPO, DPO | 🗓️ |
+| 15 | [Finetuning II: RL](./chapters/15-finetuning-rl/) | RLHF, PPO, DPO | ✅ |
 | 16 | [Deployment](./chapters/16-deployment/) | API, web app | 🗓️ |
 | 17 | [Multimodal](./chapters/17-multimodal/) | VQVAE, diffusion transformer, illustrating stories | 🗓️ |
 | — | [Appendix](./appendix/) | tensors, data types, C & assembly primers, math refreshers | 🗓️ |
